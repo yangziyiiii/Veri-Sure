@@ -139,6 +139,68 @@ class Llama4ChatFormatter(TruncatedFormatterBase):
         return messages
 
 
+class NoToolsChatFormatter(TruncatedFormatterBase):
+    """Formatter that strips tool blocks for providers with fragile tools API compatibility."""
+
+    support_tools_api: bool = False
+    support_multiagent: bool = True
+    support_vision: bool = True
+
+    supported_blocks: list[type] = [
+        TextBlock,
+        ImageBlock,
+        AudioBlock,
+        ToolUseBlock,
+        ToolResultBlock,
+    ]
+
+    async def _format(
+        self,
+        msgs: list[Msg],
+    ) -> list[dict[str, Any]]:
+        self.assert_list_of_msgs(msgs)
+
+        messages: list[dict[str, Any]] = []
+        for msg in msgs:
+            content_blocks = []
+
+            for block in msg.get_content_blocks():
+                typ = block.get("type")
+                if typ == "text":
+                    content_blocks.append({**block})
+
+                elif typ == "image":
+                    source_type = block["source"]["type"]
+                    if source_type == "url":
+                        url = block["source"]["url"]
+                    elif source_type == "base64":
+                        data = block["source"]["data"]
+                        media_type = block["source"]["media_type"]
+                        url = f"data:{media_type};base64,{data}"
+                    else:
+                        raise ValueError(f"Unsupported image source type: {source_type}")
+                    content_blocks.append({"type": "image_url", "image_url": {"url": url}})
+
+                elif typ == "audio":
+                    # Keep compatibility behavior simple: skip audio blocks for now.
+                    pass
+
+                elif typ in ("tool_use", "tool_result"):
+                    # Tool call/result blocks are intentionally stripped.
+                    pass
+
+            if content_blocks:
+                messages.append(
+                    {
+                        "role": msg.role,
+                        "name": msg.name,
+                        "content": content_blocks,
+                    },
+                )
+
+        return messages
+
+
 class UsageTrackingModel(ChatModelBase):
     def __init__(self, base_model: ChatModelBase) -> None:
         self._base_model = base_model
@@ -188,6 +250,9 @@ class UsageTrackingModel(ChatModelBase):
         self._output_tokens += int(getattr(usage, "output_tokens", 0) or 0)
 
     async def __call__(self, *args: Any, **kwargs: Any):  # type: ignore[override]
+        if _is_gemini_model(self.model_name):
+            kwargs.pop("tools", None)
+            kwargs.pop("tool_choice", None)
         res = await self._base_model(*args, **kwargs)
         if self._base_model.stream:
             async def _gen():
@@ -219,10 +284,17 @@ def _is_llama_model(model_name: str) -> bool:
     return any(k in name_lower for k in ["llama", "meta-llama"])
 
 
+def _is_gemini_model(model_name: str) -> bool:
+    name_lower = model_name.lower()
+    return "gemini" in name_lower
+
+
 def make_openai_model(cfg: OpenAIConfig) -> ChatModelBase:
     client_args: dict[str, Any] = {}
     if cfg.base_url:
         client_args["base_url"] = cfg.base_url
+    if cfg.request_timeout is not None:
+        client_args["timeout"] = float(cfg.request_timeout)
 
     base_model = OpenAIChatModel(
         model_name=cfg.model,
@@ -236,7 +308,9 @@ def make_openai_model(cfg: OpenAIConfig) -> ChatModelBase:
     return UsageTrackingModel(base_model)
 
 
-def make_formatter(model_name: str | None = None) -> OpenAIChatFormatter | Llama4ChatFormatter:
+def make_formatter(
+    model_name: str | None = None,
+) -> OpenAIChatFormatter | Llama4ChatFormatter | NoToolsChatFormatter:
     """Create a message formatter appropriate for the model.
     
     Args:
@@ -248,4 +322,6 @@ def make_formatter(model_name: str | None = None) -> OpenAIChatFormatter | Llama
     """
     if model_name and _is_llama_model(model_name):
         return Llama4ChatFormatter()
+    if model_name and _is_gemini_model(model_name):
+        return NoToolsChatFormatter()
     return OpenAIChatFormatter()

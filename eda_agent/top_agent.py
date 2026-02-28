@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 import shutil
+import traceback
 from typing import List, Tuple
 
 from .bash_tools import CommandResult, run_bash_command
@@ -151,6 +152,53 @@ class TopAgent:
             excerpt = excerpt[:6000] + "\n...<snip>...\n"
         return is_ok, excerpt + ("\n" if excerpt and not excerpt.endswith("\n") else ""), out
 
+    def _verify_tb_contract_alignment(
+        self,
+        *,
+        contract_json: str,
+        interface: str,
+        testbench: str,
+    ) -> tuple[bool, str]:
+        try:
+            obj = __import__("json").loads(contract_json)
+        except Exception as e:  # noqa: BLE001
+            return False, f"Cannot parse contract JSON: {type(e).__name__}: {e}"
+
+        module_name = str(obj.get("module_name") or "TopModule")
+        io = obj.get("io") if isinstance(obj.get("io"), list) else []
+        issues: list[str] = []
+
+        m = re.search(r"\bmodule\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", interface)
+        if not m:
+            issues.append("Interface missing `module <name>(...)` declaration.")
+        else:
+            found_module = m.group(1)
+            if found_module != module_name:
+                issues.append(f"Interface module name mismatch: expected `{module_name}`, got `{found_module}`.")
+
+        for p in io:
+            if not isinstance(p, dict):
+                continue
+            name = str(p.get("name") or "").strip()
+            if not name:
+                continue
+            width = int(p.get("width") or 1)
+            if width > 1:
+                width_pat = rf"\[\s*{width - 1}\s*:\s*0\s*\]\s*{re.escape(name)}\b"
+                if not re.search(width_pat, interface):
+                    issues.append(f"Port width mismatch or missing declaration for `{name}[{width - 1}:0]` in interface.")
+            else:
+                scalar_pat = rf"\b{name}\b"
+                if not re.search(scalar_pat, interface):
+                    issues.append(f"Missing scalar port `{name}` in interface.")
+
+        if not re.search(rf"\b{re.escape(module_name)}\b\s+dut\s*\(", testbench):
+            issues.append(f"Testbench must instantiate `{module_name}` with instance name `dut`.")
+
+        if issues:
+            return False, "\n".join(f"- {x}" for x in issues) + "\n"
+        return True, ""
+
     async def _build_contract_json(
         self,
         *,
@@ -270,6 +318,24 @@ class TopAgent:
         tb_gen.set_golden_tb_path(golden_tb_path)
         tb_input_spec = self._contract_only_context(contract_json) if self.config.contract_only else spec
         testbench, interface = await tb_gen.chat(tb_input_spec, contract_json=contract_json)
+        if not golden_tb_path:
+            tb_contract_ok, mismatch_report = self._verify_tb_contract_alignment(
+                contract_json=contract_json,
+                interface=interface,
+                testbench=testbench,
+            )
+            if not tb_contract_ok:
+                self._write_output(
+                    output_dir_per_run=output_dir_per_run,
+                    file_name="tb_contract_mismatch.txt",
+                    content=mismatch_report,
+                )
+                tb_gen.set_tb_contract_mismatch(
+                    mismatch_report=mismatch_report,
+                    previous_interface=interface,
+                    previous_tb=testbench,
+                )
+                testbench, interface = await tb_gen.chat(tb_input_spec, contract_json=contract_json)
         testbench = self._augment_dumpvars_with_dut_scope(testbench, module_name=module_name)
         self._write_output(output_dir_per_run=output_dir_per_run, file_name="tb.sv", content=testbench)
         self._write_output(output_dir_per_run=output_dir_per_run, file_name="if.sv", content=interface)
@@ -548,6 +614,12 @@ class TopAgent:
                 output_tokens=output_tokens,
             )
         except Exception as e:  # noqa: BLE001
+            tb = traceback.format_exc()
+            try:
+                (output_dir_per_run / "error.txt").write_text(f"{type(e).__name__}: {e}\n", encoding="utf-8")
+                (output_dir_per_run / "error_traceback.txt").write_text(tb, encoding="utf-8")
+            except Exception:  # noqa: BLE001
+                pass
             return TopAgentResult(
                 output_dir_per_run=str(output_dir_per_run),
                 rtl_path=rtl_path,

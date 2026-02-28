@@ -60,6 +60,32 @@ Regenerate the <interface> and <testbench> to fix ONLY the lint/syntax/unsupport
 Output must still follow <output_format> exactly.
 """
 
+CONTRACT_MISMATCH_PROMPT = r"""
+The previously generated interface/testbench is inconsistent with the contract.
+
+Detected issues:
+<contract_mismatch_report>
+{mismatch_report}
+</contract_mismatch_report>
+
+Previous interface:
+<previous_interface>
+{previous_interface}
+</previous_interface>
+
+Previous testbench (with line numbers):
+<previous_tb_with_lineno>
+{previous_tb_with_lineno}
+</previous_tb_with_lineno>
+
+Regenerate BOTH <interface> and <testbench> to match the contract exactly:
+- module name
+- port names
+- port widths
+- DUT instance name `dut` (non-golden mode)
+Keep output format exactly the same.
+"""
+
 NON_GOLDEN_TB_PROMPT = r"""
 You are given:
 1) A JSON contract written by the Architect agent (SOURCE OF TRUTH);
@@ -317,6 +343,20 @@ class TBGenerator:
     def set_tb_lint_error(self, *, lint_log: str, previous_tb: str) -> None:
         cur = TB_LINT_FAILED_PROMPT.format(
             lint_log=lint_log.strip(),
+            previous_tb_with_lineno=add_lineno(previous_tb),
+        )
+        self.failed_trial.append(cur)
+
+    def set_tb_contract_mismatch(
+        self,
+        *,
+        mismatch_report: str,
+        previous_interface: str,
+        previous_tb: str,
+    ) -> None:
+        cur = CONTRACT_MISMATCH_PROMPT.format(
+            mismatch_report=mismatch_report.strip(),
+            previous_interface=previous_interface.strip(),
             previous_tb_with_lineno=add_lineno(previous_tb),
         )
         self.failed_trial.append(cur)

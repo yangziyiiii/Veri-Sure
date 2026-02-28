@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from subprocess import PIPE, Popen, TimeoutExpired
 from typing import Tuple
 
@@ -18,6 +20,18 @@ def run_bash_command(
     *,
     cwd: str | None = None,
 ) -> Tuple[bool, str]:
+    env = os.environ.copy()
+    # Verilator 5.x may emit C++ flags unsupported by old system compilers
+    # (e.g. -fcoroutines). Prefer GCC 13 toolchain when available.
+    if not env.get("CXX"):
+        cxx13 = shutil.which("g++-13")
+        if cxx13:
+            env["CXX"] = cxx13
+    if not env.get("CC"):
+        cc13 = shutil.which("gcc-13")
+        if cc13:
+            env["CC"] = cc13
+
     process = Popen(
         cmd,
         shell=True,
@@ -25,6 +39,7 @@ def run_bash_command(
         stderr=PIPE,
         text=True,
         cwd=cwd,
+        env=env,
     )
     try:
         stdout, stderr = process.communicate(timeout=timeout)

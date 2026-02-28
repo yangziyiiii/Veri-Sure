@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+from pathlib import Path
 from typing import Tuple
 
 from .bash_tools import CommandResult, run_bash_command
@@ -21,6 +22,35 @@ def _verilator_has_fatal(stdout: str, stderr: str) -> bool:
     # Some toolchains may prefix with "Error:" without the % marker.
     text = f"{stdout}\n{stderr}".lower()
     return ("syntax error" in text) or ("error:" in text)
+
+
+def _prepare_compiler_shim(run_dir: str) -> str:
+    """Create local gcc/g++ shims preferring version 13, return shim dir or empty."""
+    cxx13 = shutil.which("g++-13")
+    cc13 = shutil.which("gcc-13")
+    if not cxx13 and not cc13:
+        return ""
+
+    shim_dir = Path(run_dir) / ".toolchain_bin"
+    shim_dir.mkdir(parents=True, exist_ok=True)
+
+    if cxx13:
+        gxx = shim_dir / "g++"
+        try:
+            if gxx.exists() or gxx.is_symlink():
+                gxx.unlink()
+            gxx.symlink_to(cxx13)
+        except Exception:  # noqa: BLE001
+            pass
+    if cc13:
+        gcc = shim_dir / "gcc"
+        try:
+            if gcc.exists() or gcc.is_symlink():
+                gcc.unlink()
+            gcc.symlink_to(cc13)
+        except Exception:  # noqa: BLE001
+            pass
+    return str(shim_dir)
 
 
 def check_syntax(rtl_path: str) -> Tuple[bool, str]:
@@ -70,10 +100,12 @@ def sim_review(
     # - Use --trace so $dumpfile/$dumpvars can generate wave.vcd for debugging.
     # - Use --assert (or default-on in newer versions) for assertion support.
     srcs = f"{tb_path} {rtl_path} {golden_rtl_path}".strip()
+    shim_dir = _prepare_compiler_shim(output_path_per_run)
+    path_prefix = f'PATH="{shim_dir}:$PATH" ' if shim_dir else ""
     cmd = (
-        "verilator --binary -j 0 --sv --timing --trace --assert -Wall -Wno-fatal "
+        f"{path_prefix}verilator --binary -j 0 --sv --timing --trace --assert -Wall -Wno-fatal "
         f"--Mdir obj_dir -o {sim_bin} {srcs}; "
-        f"{sim_bin}"
+        f"{path_prefix}{sim_bin}"
     )
     cmd_ok, sim_output = run_bash_command(cmd, timeout=120, cwd=output_path_per_run)
     sim_output_obj = CommandResult.model_validate_json(sim_output)
@@ -88,7 +120,14 @@ def sim_review(
     # Determine pass/fail primarily from the testbench's explicit result markers,
     # instead of the process return code. Some testbenches may exit non-zero
     # despite printing "SIMULATION PASSED" (or "Mismatches: 0 ...").
-    has_pass_marker = "SIMULATION PASSED" in stdout
+    pass_markers = [
+        "SIMULATION PASSED",
+        "RESULT: PASSED",
+        "ALL TESTS PASSED",
+        "NO MISMATCHES FOUND",
+    ]
+    stdout_upper = stdout.upper()
+    has_pass_marker = any(marker in stdout_upper for marker in pass_markers)
     has_mismatch_summary = bool(
         re.search(r"^Mismatches:\s*\d+\s*in\s*\d+\s*samples$", stdout, re.MULTILINE)
     )
