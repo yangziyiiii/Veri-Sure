@@ -10,3 +10,5 @@ __pycache__/
 runs/
 sim_build/
 *.xml
+.claude/
+dmxapi-claude-code-v1.3.4-linux-amd64

@@ -25,6 +25,38 @@ def _require_executable(name: str) -> None:
         raise FileNotFoundError(f"Required executable '{name}' not found in PATH.")
 
 
+def _prepare_compiler_shim(run_dir: Path) -> dict[str, str] | None:
+    """Create local gcc/g++ shims preferring version 13 and return env overrides."""
+    cxx13 = shutil.which("g++-13")
+    cc13 = shutil.which("gcc-13")
+    if not cxx13 and not cc13:
+        return None
+
+    shim_dir = run_dir / ".toolchain_bin"
+    shim_dir.mkdir(parents=True, exist_ok=True)
+
+    if cxx13:
+        gxx = shim_dir / "g++"
+        try:
+            if gxx.exists() or gxx.is_symlink():
+                gxx.unlink()
+            gxx.symlink_to(cxx13)
+        except Exception:  # noqa: BLE001
+            pass
+    if cc13:
+        gcc = shim_dir / "gcc"
+        try:
+            if gcc.exists() or gcc.is_symlink():
+                gcc.unlink()
+            gcc.symlink_to(cc13)
+        except Exception:  # noqa: BLE001
+            pass
+
+    env = dict(**__import__("os").environ)
+    env["PATH"] = f"{shim_dir}:{env.get('PATH', '')}"
+    return env
+
+
 _MISMATCH_RE = re.compile(r"^\s*Mismatches:\s*(\d+)\s*in\s*(\d+)\s*samples\s*$", re.MULTILINE)
 
 
@@ -84,12 +116,14 @@ def run_verilator_testbench_sync(
 
     log_lines: list[str] = []
     log_lines.append(f"INFO: Running command: {' '.join(cmd_compile)}\n")
+    env = _prepare_compiler_shim(run_dir)
 
     cp = subprocess.run(
         cmd_compile,
         cwd=str(run_dir),
         capture_output=True,
         text=True,
+        env=env,
     )
     if cp.stdout:
         log_lines.append(cp.stdout)
@@ -119,6 +153,7 @@ def run_verilator_testbench_sync(
             capture_output=True,
             text=True,
             timeout=timeout_s,
+            env=env,
         )
         run_returncode = rp.returncode
         if rp.stdout:
